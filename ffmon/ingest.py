@@ -175,7 +175,7 @@ class Ingestor:
         ts = rec["ts"]
         add = self.store.add_event
         if kind == "content_crash":
-            site = rec.get("site") or rec.get("ptype") or "unknown"
+            site = (rec.get("site") or "").split("://", 1)[-1] or rec.get("ptype") or "unknown"
             tabs = [self._tab_label(c, k) for k in rec.get("tabs", [])]
             title = f"Tab process crashed ({site}, {fmt_bytes(rec.get('mem'))})"
             add(c, ts, "content_crash", "bad", title, {**rec, "tab_titles": tabs}, dedupe=f"cc:{rec.get('cid')}:{ts}")

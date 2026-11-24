@@ -145,7 +145,9 @@ class Api:
         latest_ff = c.execute("SELECT * FROM ff_sample ORDER BY ts DESC LIMIT 1").fetchone()
         peak = c.execute("SELECT MAX(ff_private) p, ts FROM os_sample WHERE ts BETWEEN ? AND ?", (frm, to)).fetchone()
         avg = c.execute("SELECT AVG(ff_private) a, AVG(ff_cpu) cpu FROM os_sample WHERE ts BETWEEN ? AND ? AND ff_procs > 0", (frm, to)).fetchone()
-        counts = {r["kind"]: r["n"] for r in c.execute("SELECT kind, COUNT(*) n FROM event WHERE ts BETWEEN ? AND ? GROUP BY kind", (frm, to))}
+        counts = {}
+        for e in self._events(c, frm, to, limit=100000):
+            counts[e["kind"]] = counts.get(e["kind"], 0) + 1
         now = int(time.time() * 1000)
         k = {
             "now_ms": now,
@@ -186,7 +188,7 @@ class Api:
                 continue
             rows.append({"id": r["id"], "ts": r["ts"], "end": r["end_ts"], "kind": r["kind"], "severity": r["severity"],
                          "title": r["title"], "detail": json.loads(r["detail"] or "{}")})
-        return rows
+        return _merge_crashes(rows)
 
     def events(self, q):
         frm, to, _ = self._range(q)
@@ -398,15 +400,17 @@ class Api:
             longest = max(lingers, key=lambda d: d.get("duration_ms", 0))
             biggest = max(d.get("peak_mem", 0) for d in lingers)
             after_quit = sum(1 for d in lingers if d.get("reason") in ("windows_closed", "quit_requested"))
-            add("bad", f"Firefox didn't exit properly {len(lingers)}× ",
+            add("bad", f"Firefox didn't exit properly ({len(lingers)}×)",
                 f"After closing, Firefox stayed running for up to {fmt_dur(longest.get('duration_ms'))} and held up to {fmt_bytes(biggest)}. "
                 + ("This happened after you closed or quit it, which points to a shutdown hang. " if after_quit else "")
                 + "Common causes are an extension blocking shutdown, a huge session file being written, or a stuck content process. "
                 "To narrow it down: restart in Troubleshoot Mode (Help → Troubleshoot Mode) for a day; if lingering stops, it is an extension.",
                 "linger")
 
-        crashes = [json.loads(r["detail"]) for r in c.execute("SELECT detail FROM event WHERE kind='crash' AND ts BETWEEN ? AND ?", (frm, to))]
-        content_crashes = c.execute("SELECT COUNT(*) n FROM event WHERE kind='content_crash' AND ts BETWEEN ? AND ?", (frm, to)).fetchone()["n"]
+        merged = self._events(c, frm, to, limit=100000)
+        crashes = [e["detail"] for e in merged if e["kind"] == "crash"]
+        crashes += [e["detail"]["report"] for e in merged if e["kind"] == "content_crash" and e["detail"].get("report")]
+        content_crashes = sum(1 for e in merged if e["kind"] == "content_crash" and not e["detail"].get("report"))
         if crashes or content_crashes:
             oom = sum(1 for d in crashes if d.get("oom"))
             main = sum(1 for d in crashes if (d.get("process") or "main").lower() in ("main", "default", "browser"))
@@ -474,7 +478,7 @@ class Api:
             "AND type IN ('web','webIsolated','withCoopCoep','webServiceWorker') GROUP BY ts, site) GROUP BY site ORDER BY a DESC LIMIT 3", (frm, to)))
         total = c.execute("SELECT AVG(mem_total) a FROM ff_sample WHERE ts BETWEEN ? AND ?", (frm, to)).fetchone()["a"]
         if top_sites and total:
-            add("info", "Biggest sites", ", ".join(f"{r['site'] or '(unknown)'} avg {fmt_bytes(r['a'])} ({r['a'] / total * 100:.0f}%), peak {fmt_bytes(r['mx'])}" for r in top_sites) + ".", "sites")
+            add("info", "Biggest sites", ", ".join(f"{_bare(r['site']) or '(unknown)'} avg {fmt_bytes(r['a'])} ({r['a'] / total * 100:.0f}%), peak {fmt_bytes(r['mx'])}" for r in top_sites) + ".", "sites")
 
         ext = c.execute("SELECT AVG(s) a, MAX(s) mx FROM (SELECT ts, SUM(mem) s FROM ff_proc WHERE ts BETWEEN ? AND ? AND type='extension' GROUP BY ts)", (frm, to)).fetchone()
         if ext["mx"] and ext["mx"] > 800 * 1048576:
@@ -512,6 +516,30 @@ class Api:
         sev = {"bad": 0, "warn": 1, "info": 2}
         out.sort(key=lambda x: sev[x["severity"]])
         return out
+
+
+def _bare(site):
+    return (site or "").split("://", 1)[-1]
+
+
+def _merge_crashes(rows):
+    live = {}
+    for e in rows:
+        if e["kind"] == "content_crash" and e["detail"].get("dump"):
+            live[e["detail"]["dump"]] = e
+    if not live:
+        return rows
+    out = []
+    for e in rows:
+        if e["kind"] == "crash" and e["detail"].get("id") in live:
+            cc = live[e["detail"]["id"]]
+            cc["detail"]["report"] = e["detail"]
+            reason = e["detail"].get("meta", {}).get("MozCrashReason")
+            if reason and reason not in cc["title"]:
+                cc["title"] += f": {reason[:100]}"
+            continue
+        out.append(e)
+    return out
 
 
 def _regress(d):
