@@ -1,0 +1,27 @@
+// Firefox Monitor autoconfig. The first line of this file must stay a comment.
+// ffmon-begin
+try {
+  (function () {
+    const dir = "@@COLLECTOR_DIR@@";
+    const dataDir = "@@DATA_DIR@@";
+    const Cc = Components.classes;
+    const Ci = Components.interfaces;
+    const runtime = Cc["@mozilla.org/xre/app-info;1"].getService(Ci.nsIXULRuntime);
+    if (runtime.processType !== Ci.nsIXULRuntime.PROCESS_TYPE_DEFAULT) {
+      return;
+    }
+    const folder = Cc["@mozilla.org/file/local;1"].createInstance(Ci.nsIFile);
+    folder.initWithPath(dir);
+    if (!folder.exists()) {
+      return;
+    }
+    const io = Cc["@mozilla.org/network/io-service;1"].getService(Ci.nsIIOService);
+    io.getProtocolHandler("resource")
+      .QueryInterface(Ci.nsIResProtocolHandler)
+      .setSubstitution("ffmon", io.newFileURI(folder));
+    ChromeUtils.importESModule("resource://ffmon/collector.sys.mjs").start({ dataDir });
+  })();
+} catch (e) {
+  Components.utils.reportError(e);
+}
+// ffmon-end
