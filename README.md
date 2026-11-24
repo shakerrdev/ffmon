@@ -76,6 +76,13 @@ breaks web pages down by site, **Tabs** shows each tab with a growth rate
 (MB/hour); tabs marked *growing* are leaking. **Extensions** shows each
 add-on's share of the extension process.
 
+**Which userscript is it?** The **Userscripts** tab shows CPU per
+Tampermonkey script (any manager that gives each script its own
+`….user.js` address works). The collector runs Firefox's built-in profiler
+for 15 s every 2 minutes and adds up the time spent in each script's code,
+including page functions it calls. Slow-script warnings name the userscript
+too. Memory can't be split per script: Firefox doesn't track it that way.
+
 ## How the numbers are measured
 
 - Firefox runs one process per site, shared by all tabs of that site. A tab's
@@ -98,8 +105,18 @@ python ffmon.py autostart on|off
 python ffmon.py status
 ```
 
-The collector's sampling interval defaults to 10 s; change it with the
-`ffmon.intervalSec` pref in `about:config` (restart Firefox).
+Collector prefs in `about:config` (restart Firefox after changing):
+
+| Pref | Default | |
+|---|---|---|
+| `ffmon.intervalSec` | 10 | seconds between samples |
+| `ffmon.userscripts.enabled` | true | per-userscript CPU sampling |
+| `ffmon.userscripts.everySec` | 120 | seconds between profiler bursts |
+| `ffmon.userscripts.burstSec` | 15 | length of each burst |
+
+While a burst runs, Firefox's profiler is active (its toolbar button, if you
+added it, lights up). If you start the profiler yourself, ffmon skips its
+bursts and leaves yours alone.
 
 ## Troubleshooting
 
