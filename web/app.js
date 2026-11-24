@@ -1,7 +1,7 @@
 "use strict";
 
 const PRESETS = { "15m": 15 * 60e3, "1h": 3600e3, "6h": 6 * 3600e3, "24h": 24 * 3600e3, "3d": 3 * 86400e3, "7d": 7 * 86400e3, all: null };
-const VIEWS = ["overview", "tabs", "sites", "extensions", "events", "setup"];
+const VIEWS = ["overview", "tabs", "sites", "extensions", "userscripts", "events", "setup"];
 const KIND_LABEL = {
   crash: "Crash", content_crash: "Tab crash", linger: "Didn't exit", ui_hang: "Freeze", script_hang: "Slow script",
   system_pressure: "Low memory", memory_pressure: "Low-memory signal", tab_unloaded: "Tab unloaded", quit_requested: "Quit",
@@ -401,7 +401,7 @@ async function viewOverview(main, r) {
   if (d.insights.length) {
     const box = h("div", { class: "insights" });
     for (const i of d.insights) {
-      const link = { crash: "events", content_crash: "events", linger: "events", ui_hang: "events", script_hang: "extensions", leak: "tabs", sites: "sites", extensions: "extensions", tabs: "tabs", setup: "setup", system_pressure: "events" }[i.kind];
+      const link = { crash: "events", content_crash: "events", linger: "events", ui_hang: "events", script_hang: "extensions", leak: "tabs", sites: "sites", extensions: "extensions", tabs: "tabs", setup: "setup", system_pressure: "events", userscripts: "userscripts" }[i.kind];
       box.append(h("div", { class: `insight ${i.severity}` },
         h("div", { class: "ico" }, i.severity === "info" ? "i" : "!"),
         h("div", {}, h("b", {}, i.title), h("p", {}, i.body, link ? [" ", h("a", { href: "#", onclick: ev => { ev.preventDefault(); go(link); } }, "Details →")] : null))));
@@ -651,6 +651,38 @@ async function viewExtensions(main, r) {
     })));
 }
 
+async function viewUserscripts(main, r) {
+  const d = await api("userscripts", r);
+  const top = d.top.map((id, i) => {
+    const u = d.userscripts.find(x => x.id === id);
+    return { label: trunc(u.name, 34), full: u.name, values: d.series[id], color: seriesColor(i) };
+  });
+  const every = d.bursts ? `${d.bursts} samples of ${fmtDur(d.measured_ms / d.bursts)}` : "no samples yet";
+  main.append(h("div", { class: "grid" },
+    chartCard("Userscript CPU", `Share of all cores while measured. Firefox's profiler samples for a few seconds every couple of minutes (${every} in this range).`, body => {
+      body.append(legend(top, { line: true }));
+      timeChart(body, { ts: d.ts, series: top, fmt: fmtP, kind: "pct", total: false,
+        emptyText: d.bursts ? "No userscript code ran during the samples in this range." : "No samples yet. Needs collector v4 (restart Firefox after updating)." });
+    }),
+  ));
+  main.append(h("section", { class: "card section" }, h("h2", {}, "Userscripts"),
+    h("div", { class: "sub" }, "Only CPU can be split per script; Firefox doesn't track memory per script. Their CPU also counts toward the tab they run in."),
+    table({
+      rows: d.userscripts, sort: { key: "avg_cpu", dir: -1 },
+      empty: d.bursts ? "No userscript ran while measuring." : "No samples yet.",
+      columns: [
+        { key: "name", label: "Script", fmt: (v, u) => h("div", {}, h("div", {}, v), h("div", { class: "muted" }, u.manager || "")) },
+        { key: "avg_cpu", label: "CPU avg", num: true, hint: "Average over all samples in this range", fmt: v => fmtPct(v, 2) },
+        { key: "max_cpu", label: "CPU peak", num: true, hint: "Busiest single sample", fmt: v => fmtPct(v) },
+        { key: "active_share", label: "Running in", num: true, hint: "Share of samples in which the script ran at all", fmt: v => fmtPct(v, 0) },
+        { key: "cpu_ms", label: "CPU time measured", num: true, fmt: v => fmtDur(v) === "0s" ? `${Math.round(v)} ms` : fmtDur(v) },
+        { key: "sites", label: "Sites", sortVal: u => u.sites.join(), fmt: v => v.length ? v.join(", ") : h("span", { class: "muted" }, "–") },
+        { key: "hangs", label: "Slow scripts", num: true, fmt: v => (v ? h("span", { class: "pill warn" }, String(v)) : "0") },
+        { key: "last_seen", label: "Last ran", num: true, fmt: v => fmtTime(v) },
+      ],
+    })));
+}
+
 function eventDetail(e) {
   const d = e.detail || {};
   const rows = [];
@@ -667,7 +699,8 @@ function eventDetail(e) {
   if (d.max_commit_ratio) add("Highest commit use", fmtPct(d.max_commit_ratio, 0));
   if (d.site) add("Site", stripScheme(d.site));
   if (d.tab_titles?.length) add("Tabs affected", d.tab_titles.filter(Boolean).join(", "));
-  if (d.addonName || d.addon) add("Extension", d.addonName || d.addon);
+  if (d.usName) add("Userscript", d.usName);
+  else if (d.addonName || d.addon) add("Extension", d.addonName || d.addon);
   if (d.script) add("Script", d.script);
   if (d.pid) add("PID", d.pid);
   const rep = e.kind === "crash" ? d : d.report;
@@ -758,7 +791,7 @@ function trunc(s, n) {
 
 /* ---------- shell ---------- */
 
-const RENDER = { overview: viewOverview, tabs: viewTabs, sites: viewSites, extensions: viewExtensions, events: viewEvents, setup: viewSetup };
+const RENDER = { overview: viewOverview, tabs: viewTabs, sites: viewSites, extensions: viewExtensions, userscripts: viewUserscripts, events: viewEvents, setup: viewSetup };
 
 function go(view) {
   state.view = view;
