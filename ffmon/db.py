@@ -59,6 +59,18 @@ CREATE TABLE IF NOT EXISTS ff_ext (
 );
 CREATE INDEX IF NOT EXISTS ff_ext_ts ON ff_ext(ts);
 
+CREATE TABLE IF NOT EXISTS userscript (
+  id INTEGER PRIMARY KEY, key TEXT UNIQUE, name TEXT, manager TEXT,
+  first_seen INTEGER, last_seen INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS us_burst (ts INTEGER, main_pid INTEGER, dur INTEGER, PRIMARY KEY (ts, main_pid));
+
+CREATE TABLE IF NOT EXISTS ff_us (
+  ts INTEGER, us_id INTEGER, pid INTEGER, site TEXT, ms REAL, cpu REAL
+);
+CREATE INDEX IF NOT EXISTS ff_us_ts ON ff_us(ts);
+
 CREATE TABLE IF NOT EXISTS event (
   id INTEGER PRIMARY KEY, ts INTEGER, end_ts INTEGER, kind TEXT,
   severity TEXT, title TEXT, detail TEXT, dedupe TEXT UNIQUE
@@ -68,7 +80,7 @@ CREATE INDEX IF NOT EXISTS event_ts ON event(ts);
 CREATE TABLE IF NOT EXISTS ingest_state (file TEXT PRIMARY KEY, offset INTEGER, mtime REAL);
 """
 
-DETAIL_TABLES = ["os_sample", "os_proc", "ff_sample", "ff_proc", "ff_tab", "ff_ext"]
+DETAIL_TABLES = ["os_sample", "os_proc", "ff_sample", "ff_proc", "ff_tab", "ff_ext", "us_burst", "ff_us"]
 
 
 class Store:

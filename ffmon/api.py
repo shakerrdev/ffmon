@@ -372,6 +372,68 @@ class Api:
         finally:
             c.close()
 
+    def userscripts(self, q):
+        frm, to, bucket = self._range(q)
+        c = self._conn()
+        try:
+            bursts = {(r["ts"], r["main_pid"]): r["dur"] for r in c.execute(
+                "SELECT ts, main_pid, dur FROM us_burst WHERE ts BETWEEN ? AND ?", (frm, to))}
+            n_bursts = len(bursts)
+            hangs = {}
+            for r in c.execute("SELECT json_extract(detail,'$.usId') u, COUNT(*) n FROM event WHERE kind='script_hang' AND ts BETWEEN ? AND ? GROUP BY u", (frm, to)):
+                if r["u"]:
+                    hangs[r["u"]] = r["n"]
+            per_burst = {}
+            sites = {}
+            totals = {}
+            for r in c.execute("SELECT ts, us_id, site, ms, cpu FROM ff_us WHERE ts BETWEEN ? AND ?", (frm, to)):
+                k = (r["us_id"], r["ts"])
+                per_burst[k] = per_burst.get(k, 0) + (r["cpu"] or 0)
+                totals[r["us_id"]] = totals.get(r["us_id"], 0) + (r["ms"] or 0)
+                if r["site"]:
+                    s = sites.setdefault(r["us_id"], {})
+                    s[r["site"]] = s.get(r["site"], 0) + (r["ms"] or 0)
+            rows = []
+            for r in c.execute("SELECT * FROM userscript WHERE id IN (SELECT DISTINCT us_id FROM ff_us WHERE ts BETWEEN ? AND ?)", (frm, to)):
+                uid = r["id"]
+                cpus = [v for (u, _), v in per_burst.items() if u == uid]
+                site_ms = sorted(sites.get(uid, {}).items(), key=lambda x: -x[1])
+                rows.append({
+                    "id": uid, "key": r["key"], "name": r["name"], "manager": r["manager"],
+                    "first_seen": r["first_seen"], "last_seen": r["last_seen"],
+                    "avg_cpu": sum(cpus) / n_bursts if n_bursts else None,
+                    "max_cpu": max(cpus) if cpus else None,
+                    "active_share": len(cpus) / n_bursts if n_bursts else None,
+                    "cpu_ms": totals.get(uid, 0),
+                    "sites": [s.split("://", 1)[-1] for s, _ in site_ms[:4]],
+                    "hangs": hangs.get(r["key"], 0),
+                })
+            rows.sort(key=lambda x: x["avg_cpu"] or 0, reverse=True)
+            times = sorted({ts for ts, _ in bursts})
+            if len(times) > 2:
+                gaps = sorted(b - a for a, b in zip(times, times[1:]))
+                median = gaps[len(gaps) // 2]
+                bucket = max(bucket, int(math.ceil(median * 1.5 / 60000.0)) * 60000)
+            grid = self._grid(frm, to, bucket)
+            burst_buckets = {}
+            for (ts, _m) in bursts:
+                b = (ts // bucket) * bucket
+                burst_buckets[b] = burst_buckets.get(b, 0) + 1
+            top = [r["id"] for r in rows[:8]]
+            series = {}
+            for uid in top:
+                acc = {}
+                for (u, ts), v in per_burst.items():
+                    if u == uid:
+                        b = (ts // bucket) * bucket
+                        acc[b] = acc.get(b, 0) + v
+                series[uid] = [(acc.get(b, 0) / burst_buckets[b]) if b in burst_buckets else None for b in grid]
+            measured_ms = sum(bursts.values())
+            return {"range": {"from": frm, "to": to, "bucket": bucket}, "ts": grid, "userscripts": rows, "top": top,
+                    "series": series, "bursts": n_bursts, "measured_ms": measured_ms}
+        finally:
+            c.close()
+
     def status(self, q, extra=None):
         c = self._conn()
         try:
@@ -432,7 +494,23 @@ class Api:
 
         sh = list(c.execute(
             "SELECT COALESCE(NULLIF(json_extract(detail,'$.addonName'),''), json_extract(detail,'$.addon')) who, COUNT(*) n FROM event "
-            "WHERE kind='script_hang' AND ts BETWEEN ? AND ? GROUP BY who ORDER BY n DESC", (frm, to)))
+            "WHERE kind='script_hang' AND ts BETWEEN ? AND ? AND COALESCE(json_extract(detail,'$.usName'),'') = '' GROUP BY who ORDER BY n DESC", (frm, to)))
+        us_hangs = list(c.execute(
+            "SELECT json_extract(detail,'$.usName') who, COUNT(*) n FROM event WHERE kind='script_hang' AND ts BETWEEN ? AND ? "
+            "AND COALESCE(json_extract(detail,'$.usName'),'') <> '' GROUP BY who ORDER BY n DESC", (frm, to)))
+        n_bursts = c.execute("SELECT COUNT(*) n FROM us_burst WHERE ts BETWEEN ? AND ?", (frm, to)).fetchone()["n"]
+        heavy = []
+        if n_bursts:
+            for r in c.execute(
+                "SELECT u.name, SUM(f.cpu) s, MAX(f.cpu) mx FROM ff_us f JOIN userscript u ON u.id = f.us_id WHERE f.ts BETWEEN ? AND ? "
+                "GROUP BY u.id ORDER BY s DESC LIMIT 4", (frm, to)):
+                avg = r["s"] / n_bursts
+                if avg >= 0.005 or (r["mx"] or 0) >= 0.05:
+                    heavy.append((r["name"], avg, r["mx"]))
+        if heavy or us_hangs:
+            parts = [f"{n} averages {a * 100:.1f}% of your CPU (peaks {m * 100:.0f}%)" for n, a, m in heavy]
+            parts += [f"{r['who']} froze a page {r['n']}×" for r in us_hangs if r["who"] not in {h[0] for h in heavy}]
+            add("warn", "Userscripts using CPU", "; ".join(parts) + ". Their time is included in the tabs they run in.", "userscripts")
         ext_hangs = [r for r in sh if r["who"]]
         if ext_hangs:
             add("warn", "Extensions slowing pages down",

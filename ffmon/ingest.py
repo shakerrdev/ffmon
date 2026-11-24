@@ -15,6 +15,8 @@ class Ingestor:
         self.tab_ids = {}
         self.ext_ids = {}
         self.ext_names = {}
+        self.us_ids = {}
+        self.main_pid = 0
 
     def run_once(self):
         files = sorted(self.inbox.glob("ff-*.jsonl"))
@@ -80,12 +82,15 @@ class Ingestor:
             self._tab_meta(c, rec)
         elif t == "ext":
             self._ext_meta(c, rec)
+        elif t == "us":
+            self._userscripts(c, rec)
         elif t == "ev":
             self._event(c, rec)
         elif t == "crash":
             ts = rec.get("date") or rec.get("ts")
             record_crash(self.store, c, rec["id"], ts, rec.get("meta") or {}, ptype=rec.get("ptype", ""), remote=rec.get("remote", ""), source="firefox")
         elif t == "start":
+            self.main_pid = rec.get("pid") or 0
             c.execute(
                 "INSERT OR REPLACE INTO meta(k, v) VALUES ('collector', ?)",
                 (json.dumps({k: rec.get(k) for k in ("ts", "v", "ff", "build", "profile", "cores", "memsize", "interval", "pid")}),),
@@ -164,6 +169,23 @@ class Ingestor:
             c.execute("UPDATE ext SET last_seen=? WHERE id=?", (ts, eid))
         c.executemany("INSERT INTO ff_ext VALUES (?,?,?,?)", ext_rows)
 
+    def _userscripts(self, c, rec):
+        ts = rec["ts"]
+        c.execute("INSERT OR REPLACE INTO us_burst VALUES (?,?,?)", (ts, self.main_pid, rec.get("dur", 0)))
+        rows = []
+        for s in rec.get("scripts") or []:
+            key = s.get("id") or s.get("file") or s.get("name")
+            uid = self.us_ids.get(key)
+            if uid is None:
+                row = c.execute("SELECT id FROM userscript WHERE key=?", (key,)).fetchone()
+                uid = row["id"] if row else c.execute(
+                    "INSERT INTO userscript(key, name, manager, first_seen, last_seen) VALUES (?,?,?,?,?)",
+                    (key, s.get("name"), s.get("ext"), ts, ts)).lastrowid
+                self.us_ids[key] = uid
+            c.execute("UPDATE userscript SET name=?, manager=?, last_seen=? WHERE id=?", (s.get("name"), s.get("ext"), ts, uid))
+            rows.append((ts, uid, s.get("pid"), s.get("site", ""), s.get("ms", 0), s.get("cpu", 0)))
+        c.executemany("INSERT INTO ff_us VALUES (?,?,?,?,?,?)", rows)
+
     def _tab_label(self, c, key):
         row = c.execute("SELECT title, site FROM tab WHERE key=?", (key,)).fetchone()
         if not row:
@@ -187,7 +209,9 @@ class Ingestor:
         elif kind == "script_hang":
             who = rec.get("addonName") or rec.get("addon")
             tab = self._tab_label(c, rec.get("tab", "")) if rec.get("tab") else ""
-            if who:
+            if rec.get("usName"):
+                title = f"Slow userscript: {rec['usName']}" + (f" (in {tab})" if tab else "")
+            elif who:
                 title = f"Slow extension script: {who}" + (f" (in {tab})" if tab else "")
             else:
                 title = "Slow page script" + (f" in {tab}" if tab else "")

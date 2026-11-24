@@ -19,6 +19,7 @@ def make_server(api, web_dir: Path, host, port, status_extra):
         "/api/tab": api.tab,
         "/api/processes": api.processes,
         "/api/extensions": api.extensions,
+        "/api/userscripts": api.userscripts,
         "/api/events": api.events,
         "/api/status": lambda q: api.status(q, status_extra()),
     }
