@@ -118,6 +118,18 @@ def main(data_dir, hours=8, end_ms=None):
             push({"t": "s", "ts": t, "pid": pid, "win": 1, "procs": procs, "tabs": tab_recs, "exts": ext_recs,
                   "lag": {"max": lagmax, "avg": round(lagmax / 8, 1), "slow": lagmax // 100, "blocked": lagmax if lagmax > 50 else 0},
                   "ghost": 0 if age_h < 3 else int(age_h - 2), "sd": random.randint(4, 15)})
+            if (t - s0) % 120000 < 10000:
+                scripts = [{"id": "aaa", "name": "Comic Reader", "file": "Comic Reader.user.js", "ext": "Tampermonkey", "pid": pid + 11, "site": "https://reddit.com",
+                            "ms": round(600 + 300 * age_h + random.uniform(0, 200), 1), "n": 150, "cpu": 0}]
+                if random.random() < 0.7:
+                    scripts.append({"id": "bbb", "name": "pixiv Turbo", "file": "pixiv Turbo.user.js", "ext": "Tampermonkey", "pid": pid + 13, "site": "https://leetify.com", "ms": round(random.uniform(20, 120), 1), "n": 20, "cpu": 0})
+                if random.random() < 0.2:
+                    scripts.append({"id": "ccc", "name": "Leetify Rank Tracker", "file": "Leetify Rank Tracker.user.js", "ext": "Tampermonkey", "pid": pid + 13, "site": "https://leetify.com", "ms": round(random.uniform(200, 1500), 1), "n": 80, "cpu": 0})
+                for sc in scripts:
+                    sc["cpu"] = round(sc["ms"] / 15000 / 12, 5)
+                push({"t": "us", "ts": t, "dur": 15000, "scripts": scripts})
+            if random.random() < 0.0006:
+                push({"t": "ev", "ts": t, "kind": "script_hang", "addon": "", "usName": "Comic Reader", "usId": "aaa", "script": "moz-extension://x/userscripts/Comic%20Reader.user.js?id=aaa", "dur": 10000, "tab": tabs[1]["key"]})
             if random.random() < 0.0015:
                 push({"t": "ev", "ts": t, "kind": "script_hang", "addon": "{dark-reader}", "addonName": "Dark Reader", "script": "moz-extension://abc/inject/index.js", "dur": 11000, "tab": tabs[1]["key"]})
             if random.random() < 0.0008:
