@@ -9,10 +9,50 @@ const outDir = process.argv[2] || "/tmp/ffmon-harness";
 fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
 
-const src = fs.readFileSync(path.join(here, "..", "firefox", "collector.sys.mjs"), "utf8")
-  .replace('import { setTimeout } from "resource://gre/modules/Timer.sys.mjs";', "const { setTimeout } = globalThis;");
-const modPath = path.join(outDir, "collector.mjs");
-fs.writeFileSync(modPath, src);
+const timerImport = 'import { setTimeout } from "resource://gre/modules/Timer.sys.mjs";';
+for (const f of ["collector.sys.mjs", "userscripts.sys.mjs"]) {
+  const code = fs.readFileSync(path.join(here, "..", "firefox", f), "utf8").replace(timerImport, "const { setTimeout } = globalThis;");
+  fs.writeFileSync(path.join(outDir, f), code);
+}
+const modPath = path.join(outDir, "collector.sys.mjs");
+
+const TM = "4e5b3a85-af36-46a9-a93a-a0310ab92dd0";
+const usUrl = (name, id) => `moz-extension://${TM}/userscripts/${name}.user.js?id=${id}`;
+const profileChildA = {
+  meta: { interval: 4, sampleUnits: { threadCPUDelta: "µs" } },
+  threads: [{
+    name: "GeckoMain", pid: 201,
+    stringTable: [
+      "(root)", "Pt (https://example.com/:10:91)",
+      `window["__f__x"]/< (${usUrl("Comic%20Reader", "aaa")}:6:28)`,
+      `loop (${usUrl("pixiv-turbo", "bbb")}:40:2)`,
+      "js::RunScript",
+    ],
+    frameTable: { schema: { location: 0, relevantForJS: 1 }, data: [[0, 0], [1, 0], [2, 0], [3, 0], [4, 0]] },
+    stackTable: { schema: { prefix: 0, frame: 1 }, data: [[null, 0], [0, 2], [1, 1], [2, 4], [0, 3], [0, 1]] },
+    samples: { schema: { stack: 0, time: 1, threadCPUDelta: 2 }, data: [
+      [3, 1, 4000], [3, 2, 4000], [2, 3, 2000], [4, 4, 4000], [5, 5, 4000], [null, 6, 0], [0, 7, 100],
+    ] },
+  }],
+};
+const profileChildB = JSON.stringify({
+  meta: { interval: 4 },
+  threads: [{
+    name: "GeckoMain", pid: 202,
+    stringArray: ["(root)", `x (${usUrl("pixiv-turbo", "bbb")}:1:1)`],
+    frameTable: { schema: { location: 0 }, data: [[0], [1]] },
+    stackTable: { schema: { prefix: 0, frame: 1 }, data: [[null, 0], [0, 1]] },
+    samples: { schema: { stack: 0, time: 1, weight: 2 }, data: [[1, 1, 3], [1, 2, null]] },
+  }],
+});
+let profilerActive = false;
+const profilerMock = {
+  IsActive: () => profilerActive,
+  StartProfiler: async () => { profilerActive = true; },
+  StopProfiler: async () => { profilerActive = false; },
+  getProfileDataAsync: async () => ({ meta: { interval: 4 }, threads: [], processes: [profileChildA, profileChildB] }),
+  get activeConfiguration() { return { interval: 4, threads: ["GeckoMain"] }; },
+};
 
 const uri = spec => {
   const u = new URL(spec);
@@ -76,7 +116,11 @@ Object.assign(globalThis, {
   },
   Services: {
     appinfo: { processID: 100, version: "146.0", appBuildID: "20261117" },
-    prefs: { getIntPref: (n, d) => (n === "ffmon.intervalSec" ? 2 : d) },
+    prefs: {
+      getIntPref: (n, d) => ({ "ffmon.intervalSec": 2, "ffmon.userscripts.delaySec": 1, "ffmon.userscripts.burstSec": 2 })[n] ?? d,
+      getBoolPref: (n, d) => d,
+    },
+    profiler: profilerMock,
     sysinfo: { processInfo: Promise.resolve({ count: 8 }), getProperty: k => (k === "memsize" ? 16e9 : 8) },
     wm: { getEnumerator: () => [win] },
     obs: { addObserver: (o, topic) => observers.set(topic, o) },
@@ -93,7 +137,7 @@ Object.assign(globalThis, {
   PathUtils: { join: (...p) => path.join(...p), profileDir: "/profile" },
   WebExtensionPolicy: {
     getByURI: u => policies[u.host] || null,
-    getByHostname: h => policies[h] || null,
+    getByHostname: h => policies[h] || (h === TM ? { id: "firefox@tampermonkey.net", name: "Tampermonkey" } : null),
   },
   Cc: { "@mozilla.org/memory-reporter-manager;1": { getService: () => ({ ghostWindows: 2 }) } },
   Ci: { nsIMemoryReporterManager: {}, nsIPropertyBag2: {}, nsIHangReport: {} },
@@ -103,12 +147,14 @@ const mod = await import(pathToFileURL(modPath).href);
 mod.start({ dataDir: outDir });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 await sleep(7500);
+await sleep(1500);
 
 lazyTab.linkedBrowser.isConnected = true;
 tabs[1].linkedBrowser.isConnected = false;
 const notify = (topic, subject, data) => observers.get(topic).observe(subject, topic, data);
 notify("ipc:content-shutdown", { QueryInterface() { return this; }, get: k => ({ abnormal: true, childID: 2, dumpID: "dump-1" })[k] });
 notify("process-hang-report", { QueryInterface() { return this; }, addonId: "addon@darkreader.org", scriptFileName: "moz-extension://dark/inject.js", hangDuration: 9000, childID: 3, scriptBrowser: yt.linkedBrowser });
+notify("process-hang-report", { QueryInterface() { return this; }, addonId: "", scriptFileName: usUrl("Comic%20Reader", "aaa"), hangDuration: 12000, childID: 2, scriptBrowser: yt.linkedBrowser });
 notify("memory-pressure", null, "low-memory");
 await sleep(2500);
 notify("quit-application-granted");
@@ -146,5 +192,17 @@ check(ev.some(e => e.kind === "quit_requested") && ev.some(e => e.kind === "quit
 check(!ev.some(e => e.kind === "collector_error"), "no collector errors");
 check(last.lag && typeof last.lag.max === "number", "lag stats present");
 check(samples[0].ghost === 2, "ghost windows sampled");
+const us = by("us");
+check(us.length >= 1, "userscript burst recorded");
+const u0 = us[0]?.scripts || [];
+const comic = u0.find(x => x.id === "aaa");
+const pixA = u0.find(x => x.id === "bbb" && x.pid === 201);
+const pixB = u0.find(x => x.id === "bbb" && x.pid === 202);
+check(comic && comic.name === "Comic Reader" && comic.ext === "Tampermonkey" && comic.ms === 10 && comic.n === 3, "innermost userscript frame wins, CPU deltas in µs used, name decoded");
+check(pixA && pixA.ms === 4 && pixA.site === "https://youtube.com", "second script in same process with its site");
+check(pixB && pixB.ms === 16 && pixB.n === 2, "string child profile, stringArray, sample weights");
+check(!u0.some(x => x.pid === 201 && x.n > 4), "page-only and idle samples not attributed");
+check(ev.some(e => e.kind === "script_hang" && e.usName === "Comic Reader"), "slow userscript named in hang event");
+check(!profilerActive, "profiler stopped after burst");
 console.log(`${lines.length} records`);
 process.exit();

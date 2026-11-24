@@ -6,6 +6,7 @@
  */
 
 import { setTimeout } from "resource://gre/modules/Timer.sys.mjs";
+import { UserscriptSampler, parseScriptUrl } from "./userscripts.sys.mjs";
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
@@ -13,7 +14,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
 });
 
-export const COLLECTOR_VERSION = 3;
+export const COLLECTOR_VERSION = 4;
 
 const LAG_TICK_MS = 250;
 const SLOW_TICK_MS = 100;
@@ -42,6 +43,9 @@ const state = {
   hangThrottle: new Map(),
   crashIdsSent: new Set(),
   lag: { last: 0, max: 0, sum: 0, n: 0, slow: 0, blocked: 0 },
+  lagPaused: false,
+  siteByPid: new Map(),
+  userscripts: null,
   sampleNo: 0,
   lastError: 0,
   quitting: false,
@@ -84,6 +88,18 @@ async function boot() {
   });
   await refreshExtensions();
   sampleLoop();
+  state.userscripts = new UserscriptSampler({
+    push,
+    reportError,
+    cores: state.cores,
+    siteOfPid: pid => state.siteByPid.get(pid) || "",
+    extName: uuid => safe(() => WebExtensionPolicy.getByHostname(uuid)?.name, ""),
+    setBusy: busy => {
+      state.lagPaused = busy;
+      state.lag.last = 0;
+    },
+  });
+  state.userscripts.start();
   setTimeout(() => sendCrashes().catch(reportError), 60000);
 }
 
@@ -139,6 +155,7 @@ async function sample() {
     }
   }
   state.prevCpu = nextCpu;
+  state.siteByPid = new Map(procs.map(p => [p.pid, p.site]));
 
   const { tabs, windows } = collectTabs(procByPid);
   const exts = attributeExtensions(procByPid);
@@ -482,10 +499,13 @@ function handleTopic(subject, topic, data) {
           tab = tabKey(t);
         }
       }
+      const us = parseScriptUrl(script);
       push({
         t: "ev",
         ts,
         kind: "script_hang",
+        usName: us?.name || "",
+        usId: us?.id || "",
         addon: addonId,
         addonName: state.extNameById.get(addonId) || "",
         script: script.slice(0, MAX_URL),
@@ -503,6 +523,7 @@ function handleTopic(subject, topic, data) {
       break;
     case "quit-application":
       state.quitting = true;
+      state.userscripts?.stop();
       push({ t: "ev", ts, kind: "quit", pid: state.mainPid });
       flush();
       break;
@@ -512,7 +533,7 @@ function handleTopic(subject, topic, data) {
 function lagTick() {
   const now = ChromeUtils.now();
   const lag = state.lag;
-  if (lag.last) {
+  if (lag.last && !state.lagPaused) {
     const late = Math.max(0, now - lag.last - LAG_TICK_MS);
     lag.n++;
     lag.sum += late;
