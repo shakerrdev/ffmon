@@ -213,3 +213,4 @@ label.check { font-size: 12px; color: var(--text-secondary); display: inline-fle
 code { font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 12.5px; background: var(--surface-2); padding: 1px 5px; border-radius: 4px; }
 pre { background: var(--surface-2); padding: 10px 12px; border-radius: 8px; overflow: auto; font-size: 12.5px; }
 .status-line { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+.viz-root a { color: var(--accent); }
