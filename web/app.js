@@ -6,6 +6,7 @@ const KIND_LABEL = {
   crash: "Crash", content_crash: "Tab crash", linger: "Didn't exit", ui_hang: "Freeze", script_hang: "Slow script",
   system_pressure: "Low memory", memory_pressure: "Low-memory signal", tab_unloaded: "Tab unloaded", quit_requested: "Quit",
   ff_started: "Started", ff_exited: "Exited", collector_start: "Tracking", collector_error: "Collector error",
+  mem_report: "Memory snapshot",
 };
 
 const state = {
@@ -703,6 +704,7 @@ function eventDetail(e) {
   else if (d.addonName || d.addon) add("Extension", d.addonName || d.addon);
   if (d.script) add("Script", d.script);
   if (d.pid) add("PID", d.pid);
+  if (e.kind === "mem_report") return h("dl", { class: "kv" }, rows.concat(memReportRows(d)));
   const rep = e.kind === "crash" ? d : d.report;
   if (rep) {
     add("Process", rep.process);
@@ -715,6 +717,28 @@ function eventDetail(e) {
     add("Crash ID", rep.id);
   }
   return h("dl", { class: "kv" }, rows);
+}
+
+function memReportRows(d) {
+  const r = d.rep;
+  const rows = [];
+  const add = (k, v) => v != null && v !== "" && rows.push(h("dt", {}, k), h("dd", {}, v));
+  if (d.growth) add("Growth, last 3 min", fmtBytes(d.growth));
+  if (!r) {
+    add("Report", "Firefox returned nothing for this process");
+    return rows;
+  }
+  const o = r.other || {};
+  add("Explicit allocations", fmtBytes(r.explicit));
+  if (r.heapUnclassified != null) add("heap-unclassified", fmtBytes(r.heapUnclassified));
+  for (const k of ["resident", "resident-unique", "private", "imagelib-surface-cache-estimated-total"]) if (o[k] != null) add(k, fmtBytes(o[k]));
+  const list = items => h("div", {}, ...items.map(t => h("div", {}, t)));
+  add("Biggest areas", list(r.groups.filter(g => g.p.split("/").length === 3).slice(0, 8).map(g => `${fmtBytes(g.b)}  ${g.p}`)));
+  if (r.images?.length) {
+    add(`Images (${r.imageCount})`, list(r.images.slice(0, 8).map(i => `${fmtBytes(i.b)}  ${i.key}  ·  ${i.surfaceCount} decoded ${i.surfaceCount === 1 ? "copy" : "copies"}`)));
+  }
+  if (r.windows?.length) add("Biggest pages", list(r.windows.slice(0, 5).map(w => `${fmtBytes(w.b)}  ${w.p}`)));
+  return rows;
 }
 
 function eventList(events, compact) {
