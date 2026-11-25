@@ -7,6 +7,7 @@
 
 import { setTimeout } from "resource://gre/modules/Timer.sys.mjs";
 import { UserscriptSampler, parseScriptUrl } from "./userscripts.sys.mjs";
+import { MemReporter } from "./memreport.sys.mjs";
 
 const lazy = {};
 ChromeUtils.defineESModuleGetters(lazy, {
@@ -14,7 +15,7 @@ ChromeUtils.defineESModuleGetters(lazy, {
   PrivateBrowsingUtils: "resource://gre/modules/PrivateBrowsingUtils.sys.mjs",
 });
 
-export const COLLECTOR_VERSION = 4;
+export const COLLECTOR_VERSION = 5;
 
 const LAG_TICK_MS = 250;
 const SLOW_TICK_MS = 100;
@@ -46,6 +47,7 @@ const state = {
   lagPaused: false,
   siteByPid: new Map(),
   userscripts: null,
+  memrep: null,
   sampleNo: 0,
   lastError: 0,
   quitting: false,
@@ -87,6 +89,7 @@ async function boot() {
     interval: state.intervalMs / 1000,
   });
   await refreshExtensions();
+  state.memrep = new MemReporter({ push, reportError, dataDir: state.dataDir });
   sampleLoop();
   state.userscripts = new UserscriptSampler({
     push,
@@ -189,6 +192,8 @@ async function sample() {
     ghost,
     sd: Math.round(ChromeUtils.now() - t0),
   });
+
+  state.memrep?.tick(procs).catch(reportError);
 
   if (state.sampleNo % 30 === 0) {
     refreshExtensions().catch(reportError);

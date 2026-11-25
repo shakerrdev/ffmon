@@ -10,8 +10,9 @@ fs.rmSync(outDir, { recursive: true, force: true });
 fs.mkdirSync(outDir, { recursive: true });
 
 const timerImport = 'import { setTimeout } from "resource://gre/modules/Timer.sys.mjs";';
-for (const f of ["collector.sys.mjs", "userscripts.sys.mjs"]) {
-  const code = fs.readFileSync(path.join(here, "..", "firefox", f), "utf8").replace(timerImport, "const { setTimeout } = globalThis;");
+const memTimerImport = 'import { setTimeout, clearTimeout } from "resource://gre/modules/Timer.sys.mjs";';
+for (const f of ["collector.sys.mjs", "userscripts.sys.mjs", "memreport.sys.mjs"]) {
+  const code = fs.readFileSync(path.join(here, "..", "firefox", f), "utf8").replace(timerImport, "const { setTimeout } = globalThis;").replace(memTimerImport, "const { setTimeout, clearTimeout } = globalThis;");
   fs.writeFileSync(path.join(outDir, f), code);
 }
 const modPath = path.join(outDir, "collector.sys.mjs");
@@ -79,8 +80,10 @@ const lazyTab = addTab("Old tab", "https://example.org/", 203, [], { discarded: 
 gBrowser.selectedTab = tabs[0];
 
 let cpuBase = 0;
+let leakMem = 3.2e9;
 const procInfo = () => {
   cpuBase += 1e9;
+  leakMem += 1.5e9;
   const child = (pid, childID, type, origin, memory, cpuF, windows = []) => ({ pid, childID, type, origin, memory, cpuTime: cpuBase * cpuF, threads: [{}, {}], windows });
   return {
     pid: 100, memory: 700e6, cpuTime: cpuBase * 0.2, threads: [{}, {}, {}],
@@ -91,10 +94,37 @@ const procInfo = () => {
       child(209, 9, "webIsolated", "https://secret.example^privateBrowsingId=1", 120e6, 0.01),
       child(300, 10, "extension", "", 400e6, 0.1, [{ documentURI: uri("moz-extension://ublock/background.html") }, { documentURI: uri("moz-extension://dark/bg.html") }, { documentURI: uri("moz-extension://dark/popup.html") }]),
       child(400, 11, "gpu", "", 350e6, 0.1),
+      child(210, 12, "webIsolated", "https://4ucomics.com", leakMem, 0.14),
     ],
   };
 };
 
+let reportCalls = 0;
+const memMgr = {
+  ghostWindows: 2,
+  getReports(handle, hd, finish) {
+    reportCalls++;
+    const four = "webIsolated=https://4ucomics.com (pid 210)";
+    const img = (w, h, s) => `explicit/images/content/raster/used/image(${w}x${h}, https:\\\\4ucomics.com\\api\\v1\\img?url=p${h})/surface(${s})/locked`;
+    const reps = [
+      [four, "explicit/js-non-window/zones/zone(0x1)/strings", 1, 0, 50e6],
+      [four, "explicit/window-objects/top(https:\\\\4ucomics.com\\read\\x\\46\\1, id=7)/active/window(https:\\\\4ucomics.com\\read\\x\\46\\1)/dom/element-nodes", 1, 0, 20e6],
+      [four, img(900, 16000, "900x16000@0"), 0, 0, 57.6e6],
+      [four, img(900, 16000, "1532x27236@0"), 0, 0, 166e6],
+      [four, img(900, 16000, "1515x26934@0"), 0, 0, 163e6],
+      [four, img(900, 2450, "900x2450@0"), 0, 0, 8.8e6],
+      [four, "heap-allocated", 2, 0, 900e6],
+      [four, "resident-unique", 2, 0, 6e9],
+      [four, "ghost-windows", 2, 1, 0],
+      ["webIsolated=https://youtube.com (pid 201)", "explicit/js-non-window/runtime", 1, 0, 40e6],
+      ["", "explicit/startup-cache", 0, 0, 1e6],
+    ];
+    setTimeout(() => {
+      for (const [proc, p, kind, units, amount] of reps) handle(proc, p, kind, units, amount, "", null);
+      finish(null);
+    }, 50);
+  },
+};
 const observers = new Map();
 const policies = { ublock: { id: "uBlock0@raymondhill.net", name: "uBlock Origin" }, dark: { id: "addon@darkreader.org", name: "Dark Reader" } };
 let t0 = performance.now();
@@ -128,6 +158,9 @@ Object.assign(globalThis, {
     crashmanager: { getCrashes: async () => [{ id: "c-1", crashDate: new Date(), type: "main-crash", processType: "main", remoteID: "bp-9", metadata: { OOMAllocationSize: "1048576" } }] },
   },
   IOUtils: {
+    exists: async p => fs.existsSync(p),
+    readUTF8: async p => fs.readFileSync(p, "utf8"),
+    remove: async p => fs.rmSync(p, { force: true }),
     makeDirectory: async d => fs.mkdirSync(d, { recursive: true }),
     writeUTF8: async (p, text, opts) => {
       if (opts.mode !== "appendOrCreate") throw new Error("unexpected mode");
@@ -139,15 +172,16 @@ Object.assign(globalThis, {
     getByURI: u => policies[u.host] || null,
     getByHostname: h => policies[h] || (h === TM ? { id: "firefox@tampermonkey.net", name: "Tampermonkey" } : null),
   },
-  Cc: { "@mozilla.org/memory-reporter-manager;1": { getService: () => ({ ghostWindows: 2 }) } },
-  Ci: { nsIMemoryReporterManager: {}, nsIPropertyBag2: {}, nsIHangReport: {} },
+  Cc: { "@mozilla.org/memory-reporter-manager;1": { getService: () => memMgr } },
+  Ci: { nsIMemoryReporterManager: {}, nsIPropertyBag2: {}, nsIHangReport: {}, nsIMemoryReporter: { UNITS_BYTES: 0, UNITS_COUNT: 1, KIND_NONHEAP: 0, KIND_HEAP: 1, KIND_OTHER: 2 } },
 });
 
 const mod = await import(pathToFileURL(modPath).href);
 mod.start({ dataDir: outDir });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 await sleep(7500);
-await sleep(1500);
+fs.writeFileSync(path.join(outDir, "memreport-request.json"), JSON.stringify({ pids: [201] }));
+await sleep(3500);
 
 lazyTab.linkedBrowser.isConnected = true;
 tabs[1].linkedBrowser.isConnected = false;
@@ -204,5 +238,17 @@ check(pixB && pixB.ms === 16 && pixB.n === 2, "string child profile, stringArray
 check(!u0.some(x => x.pid === 201 && x.n > 4), "page-only and idle samples not attributed");
 check(ev.some(e => e.kind === "script_hang" && e.usName === "Comic Reader"), "slow userscript named in hang event");
 check(!profilerActive, "profiler stopped after burst");
+const mr = ev.filter(e => e.kind === "mem_report");
+const auto = mr.find(e => e.pid === 210 && e.reason === "runaway");
+check(auto && auto.site === "https://4ucomics.com" && auto.growth >= 2 ** 30, "runaway process gets an automatic memory snapshot");
+check(mr.filter(e => e.pid === 210 && e.reason === "runaway").length === 1, "automatic snapshot has a cooldown");
+const r = auto?.rep;
+check(r && Math.abs(r.explicit - (50e6 + 20e6 + 57.6e6 + 166e6 + 163e6 + 8.8e6)) < 1 && Math.abs(r.heapUnclassified - (900e6 - 70e6)) < 1, "explicit total and heap-unclassified");
+check(r && r.images[0].surfaceCount === 3 && r.images[0].key.startsWith("image(900x16000") && r.imageCount === 2, "images grouped with their decoded surfaces");
+check(r && r.other["resident-unique"] === 6e9 && r.windows[0].p.startsWith("top(https:\\\\4ucomics.com"), "top-level measurements and windows kept");
+check(r && !r.leaves.some(l => l.p.includes("youtube")), "other processes' reports filtered out");
+const req = mr.find(e => e.pid === 201 && e.reason === "requested");
+check(req && req.rep && req.rep.explicit === 40e6, "requested snapshot for a chosen pid");
+check(!fs.existsSync(path.join(outDir, "memreport-request.json")), "request file consumed");
 console.log(`${lines.length} records`);
 process.exit();
