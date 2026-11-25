@@ -225,5 +225,10 @@ class Ingestor:
             add(c, ts, "tab_unloaded", "info", f"Tab unloaded: {label}", rec, dedupe=f"tu:{rec.get('tab')}:{ts}")
         elif kind == "quit_requested":
             add(c, ts, "quit_requested", "info", "You quit Firefox", rec, dedupe=f"q:{rec.get('pid')}:{ts}")
+        elif kind == "mem_report":
+            site = (rec.get("site") or "").split("://", 1)[-1] or rec.get("ptype") or "a"
+            why = "growing fast" if rec.get("reason") == "runaway" else "on request"
+            sev = "warn" if rec.get("reason") == "runaway" else "info"
+            add(c, ts, "mem_report", sev, f"Memory snapshot of {site} process at {fmt_bytes(rec.get('mem'))} ({why})", rec, dedupe=f"mr:{rec.get('pid')}:{ts}")
         elif kind == "collector_error":
             add(c, ts, "collector_error", "warn", f"Collector error: {rec.get('msg', '')[:120]}", rec, dedupe=f"ce:{ts}")
